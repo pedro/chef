@@ -25,6 +25,35 @@ class Chef
     class Package
       class Rubygems < Chef::Provider::Package  
       
+        def self.versions
+          @@versions ||= {}
+        end
+      
+        def self.version_for(gem_binary_path, gem_name)
+          versions[gem_binary_path] ||= gem_list_parse(gem_binary_path)
+          versions[gem_binary_path][gem_name]
+        end
+      
+        def self.gem_list_parse(gem_binary_path)
+          gems = {}
+          status = Chef::Mixin::Command.popen4("#{gem_binary_path} list --local") do |pid, stdin, stdout, stderr|
+            stdout.each do |line|
+              name, versions = gem_line_parse(line)
+              gems[name] = versions if name
+            end
+          end
+          unless status.exitstatus == 0
+            raise Chef::Exceptions::Package, "#{gem_binary_path} list --local failed - #{status.inspect}!"
+          end
+          gems
+        end
+      
+        def self.gem_line_parse(line)
+          if line =~ /(.*) \((.*)\)/
+            return $1, $2.split(', ')
+          end
+        end
+      
         def gem_list_parse(line)
           installed_versions = Array.new
           if line.match("^#{@new_resource.package_name} \\((.+?)\\)$")
@@ -46,26 +75,15 @@ class Chef
           @current_resource.version(nil)
         
           # First, we need to look up whether we have the local gem installed or not
-          status = popen4("#{gem_binary_path} list --local #{@new_resource.package_name}") do |pid, stdin, stdout, stderr|
-            stdout.each do |line|
-              installed_versions = gem_list_parse(line)
-              next unless installed_versions
-              # If the version we are asking for is installed, make that our current
-              # version.  Otherwise, go ahead and use the highest one, which
-              # happens to come first in the array.
-              if installed_versions.detect { |v| v == @new_resource.version }
-                Chef::Log.debug("#{@new_resource.package_name} at version #{@new_resource.version}")
-                @current_resource.version(@new_resource.version)
-              else
-                iv = installed_versions.first
-                Chef::Log.debug("#{@new_resource.package_name} at version #{iv}")
-                @current_resource.version(iv)
-              end
+          if installed_versions = self.class.version_for(gem_binary_path, @new_resource.package_name)
+            if installed_versions.detect { |v| v == @new_resource.version }
+              Chef::Log.debug("#{@new_resource.package_name} at version #{@new_resource.version}")
+              @current_resource.version(@new_resource.version)
+            else
+              iv = installed_versions.first
+              Chef::Log.debug("#{@new_resource.package_name} at version #{iv}")
+              @current_resource.version(iv)
             end
-          end
-          
-          unless status.exitstatus == 0
-            raise Chef::Exceptions::Package, "#{gem_binary_path} list --local failed - #{status.inspect}!"
           end
           
           @current_resource
@@ -102,6 +120,8 @@ class Chef
           run_command(
             :command => "#{gem_binary_path} install #{name} -q --no-rdoc --no-ri -v #{version}#{src}"
           )
+          self.class.versions[gem_binary_path][name] ||= []
+          self.class.versions[gem_binary_path][name] << version
         end
       
         def upgrade_package(name, version)
@@ -113,10 +133,14 @@ class Chef
             run_command(
               :command => "#{gem_binary_path} uninstall #{name} -q -v #{version}"
             )
+            if self.class.versions[gem_binary_path][name]
+              self.class.versions[gem_binary_path][name].delete(version)
+            end
           else
             run_command(
               :command => "#{gem_binary_path} uninstall #{name} -q -a"
             )
+            self.class.versions[gem_binary_path].delete(name)
           end
         end
       
