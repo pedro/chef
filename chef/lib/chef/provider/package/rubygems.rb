@@ -116,12 +116,18 @@ class Chef
           src = nil
           if @new_resource.source
             src = "  --source=#{@new_resource.source} --source=http://gems.rubyforge.org"
-          end  
-          run_command(
-            :command => "#{gem_binary_path} install #{name} -q --no-rdoc --no-ri -v #{version}#{src}"
-          )
-          self.class.versions[gem_binary_path][name] ||= []
-          self.class.versions[gem_binary_path][name] << version
+          end
+          status = popen4("#{gem_binary_path} install #{name} -q --no-rdoc --no-ri -v #{version}#{src}") do |pid, stdin, stdout, stderr|
+            stdout.each do |line|
+              if line =~ /installed (.*)-([\d\.]*)/
+                self.class.versions[gem_binary_path][$1] ||= []
+                self.class.versions[gem_binary_path][$1] << $2
+              end
+            end
+          end
+          unless status.exitstatus == 0
+            raise Chef::Exceptions::Package, "#{gem_binary_path} install #{name} -q --no-rdoc --no-ri -v #{version}#{src} failed - #{status.inspect}!"
+          end
         end
       
         def upgrade_package(name, version)
